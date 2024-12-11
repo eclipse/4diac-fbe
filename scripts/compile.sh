@@ -32,15 +32,17 @@ srcdir="$buildroot/4diac-forte/"
 [ -d "$srcdir" ] || srcdir="$buildroot/forte/"
 [ -d "$srcdir" ] || srcdir="$basedir/forte/"
 builddir="$buildroot/build"
+
+depdir="$basedir/dependencies/recipes"
 extradepdir="$buildroot/dependencies/recipes/"
 
-if [ ! -x "${basedir}/toolchains/bin/cget" ]; then
-	( cd "${basedir}/toolchains" && "./etc/install-$(uname -s)-$(uname -m).sh"; )
+if [ ! -x "$basedir/toolchains/bin/cget" ]; then
+	( cd "$basedir/toolchains" && "./etc/install-$(uname -s)-$(uname -m).sh"; )
 fi
 
-if [ "$PATH" != "${basedir}/toolchains/bin" ]; then
-	PATH="${basedir}/toolchains/bin"
-	exec "${basedir}/toolchains/bin/sh" "$0" "$@"
+if [ "$PATH" != "$basedir/toolchains/bin" ]; then
+	PATH="$basedir/toolchains/bin"
+	exec "$basedir/toolchains/bin/sh" "$0" "$@"
 fi
 
 export LANG=C
@@ -59,9 +61,9 @@ replace() { # replace varname "foo" "bar"
 }
 
 update_forte_build_workaround() {
-    mkdir -p "${extradepdir}/forte/"
-    [ -f "${extradepdir}/forte/build.cmake" ] || cp "${basedir}/dependencies/recipes/forte/build.cmake" "${extradepdir}/forte/"
-    echo "$srcdir/ -X build.cmake" > "${extradepdir}/forte/package.txt"
+    mkdir -p "$extradepdir/forte/"
+    [ -f "$extradepdir/forte/build.cmake" ] || cp "$depdir/forte/build.cmake" "$extradepdir/forte/"
+    echo "$srcdir/ -X build.cmake" > "$extradepdir/forte/package.txt"
 }
 
 create_compile_commands_json() {
@@ -75,6 +77,86 @@ create_compile_commands_json() {
 	else
 		cp "$prefix/forte/build/compile_commands.json" "$builddir/.."
 	fi
+}
+
+detect_legacy_open62541_version() {
+	local version=""
+
+	if grep -q __UA_Client_AsyncService "$srcdir"/src/com/opc_ua/opcua_client_information.cpp; then
+		version=1.4
+	elif grep -q paUaServerConfig.customHostname "$srcdir"/src/com/opc_ua/opcua_local_handler.cpp; then
+		version=1.3
+	elif grep -q UA_Client_connectUsername "$srcdir"/src/com/opc_ua/opcua_client_information.cpp; then
+		version=1.1
+	elif [ -d "$srcdir"/src/com/opc_ua ] || grep -q opcua_local_handler "$srcdir"/src/modules/opc_ua/CMakeLists.txt; then
+		version=1.0
+	elif grep -q UA_ServerConfig_new_minimal "$srcdir"/src/modules/opc_ua/opcua_handler.cpp; then
+		# this is a bit fuzzy: there were gradual changes in FORTE and open62541, so it might break depending on the exact version
+		version=0.3
+	else
+		# There is older open62541 support before March 2017, commit
+		# 843ca27be7dffddb3f0c724fa4afb3d34382bc95. 4diac-fbe did not exist back
+		# then and so does not have recipes for that.
+		version=0.2
+	fi
+
+	[ -z "$version" ] || ln -sf "open62541@$version" "open62541" || cp -r "open62541@$version" "open62541"
+}
+
+prepare_recipe_dir() {
+	local prefix="$1"
+	local recipes="$prefix/etc/cget/recipes"
+	mkdir -p "$recipes"
+
+	# try to symlink, but if that fails (windows), copy instead -- and copy every time to keep recipes up to date
+	if [ -d "$extradepdir" ]; then
+		cd "$extradepdir"
+		for i in */; do
+			ln -sf "$extradepdir/$i" "$recipes/" || cp -r "$extradepdir/$i" "$recipes/"
+		done
+	fi
+	cd "$depdir"
+	for i in */; do
+		[ -d "$recipes/$i" ] || ln -sf "$PWD/$i" "$recipes/" || cp -r "$i" "$recipes/"
+	done
+
+	# for all versioned recipes: select correct package version based on SPDX file 
+	cd "$recipes"
+	local spdx="$srcdir/dependencies.spdx"
+	if [ ! -f "$spdx" ]; then
+		detect_legacy_open62541_version
+		return
+	fi
+
+	for i in *@*; do
+		local pkgname="${i%%@*}"
+
+		[ ! -d "$pkgname" ] || continue
+
+		# parse SPDX
+		local found="0" version=""
+		while read tag value; do
+			case "$found:$tag" in
+				0:PackageName:)
+					[ "$value" = "$pkgname" ] || continue;
+					found=1;;
+				1:PackageName:)
+					[ "$value" != "$pkgname" ] || continue;
+					found=0;;
+				1:PackageVersion:)
+					version="@$value";;
+			esac
+		done < "$spdx"
+
+		# select matching recipe, if any
+		while [ -n "$version" ]; do
+			if [ -d "$pkgname$version" ]; then
+				ln -sf "$pkgname$version" "$pkgname" || cp -r "$pkgname$version" "$pkgname"
+				return
+			fi
+			version="${version%[@.]*}"
+		done
+	done
 }
 
 
@@ -198,20 +280,7 @@ build_one() {
 
 	reset_build_if_changed "$file"
 
-	local recipes="$prefix/etc/cget/recipes"
-	mkdir -p "$recipes"
-
-	# try to symlink, but if that fails (windows), copy instead -- and copy every time to keep recipes up to date
-	if [ -d "$extradepdir" ]; then
-		cd "$extradepdir"
-		for i in */; do
-			ln -sf "$extradepdir/$i" "$recipes/" || cp -r "$extradepdir/$i" "$recipes/"
-		done
-	fi
-	cd "$basedir/dependencies/recipes"
-	for i in */; do
-		[ -d "$recipes/$i" ] || ln -sf "$PWD/$i" "$recipes/" || cp -r "$i" "$recipes/"
-	done
+	prepare_recipe_dir "$prefix"
 
 	set_define ARCH STRING "native-toolchain"
 

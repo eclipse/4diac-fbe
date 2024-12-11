@@ -1,5 +1,6 @@
 /build
 /runtime*
+/4diac-forte
 /configurations/*
 !/configurations/native-toolchain.txt
 !/configurations/debug.txt
